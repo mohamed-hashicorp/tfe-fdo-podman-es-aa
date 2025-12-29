@@ -1,0 +1,22 @@
+#acme prod
+#acme_server_url         = "https://acme-v02.api.letsencrypt.org/directory"
+
+# acme staging
+acme_server_url         = "https://acme-staging-v02.api.letsencrypt.org/directory"
+
+dns_record              = "server2.mohamed-abdelbaset.sbx.hashidemos.io"
+email                   = "user@domain.tld"
+hosted_zone_name        = "mohamed-abdelbaset.sbx.hashidemos.io"
+instance_type           = "t2.large"
+name                    = "my-vm"
+rds_password            = "Mystrongpassword123!"
+region                  = "eu-west-1"
+tfe_admin_password      = "Mystrongpassword123"
+tfe_encryption_password = "Mystrongpassword123"
+tfe_image_tag           = "v202503-1"
+tfe_license             = "<YOUR_TFE_LICENSE_KEY>"
+s3_bucket_name            = "Mystrongpassword123"
+rds_password              = "Mystrongpassword123"
+db_user                 = "postgres"
+rds_db_name             = "tfe"
+lb_name                 = "lb-example"

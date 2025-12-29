@@ -1,0 +1,351 @@
+#cloud-config
+packages:
+  - git
+  - jq
+  - vim
+  - wget
+  - language-pack-en
+  - curl
+  - zip
+  - unzip
+  - ca-certificates
+  - podman
+
+write_files:
+  - path: /usr/local/bin/fetch-tfe-certs.sh
+    permissions: "0755"
+    owner: root:root
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      LOG_FILE="/var/log/tfe-ssm-certs.log"
+      exec > >(tee -a "$LOG_FILE") 2>&1
+
+      echo "=== Fetching TFE TLS certificates from SSM ==="
+      echo "Date: $(date -Is)"
+
+      install_awscli_v2() {
+        echo "aws not found. Installing AWS CLI v2..."
+        export DEBIAN_FRONTEND=noninteractive
+
+        apt-get update -y
+        apt-get install -y --no-install-recommends curl unzip ca-certificates
+
+        tmpdir="$(mktemp -d)"
+        cd "$${tmpdir}"
+
+        curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+        unzip -q awscliv2.zip
+        ./aws/install --update
+
+        cd /
+        rm -rf "$${tmpdir}"
+
+        echo "AWS CLI installed: $(aws --version)"
+      }
+
+      if ! command -v aws >/dev/null 2>&1; then
+        install_awscli_v2
+      else
+        echo "AWS CLI present: $(aws --version)"
+      fi
+
+      CERT_DIR="/etc/terraform-enterprise/certs"
+      mkdir -p "$${CERT_DIR}"
+
+      fetch_to_file() {
+        local param_name="$1"
+        local out_file="$2"
+        
+        echo "Fetching $${param_name} -> $${out_file}"
+
+        # Retry up to 10 times (50 seconds total)
+        for i in {1..10}; do
+          if aws ssm get-parameter --name "$${param_name}" --with-decryption --region "${region}" --query 'Parameter.Value' --output text > "$${out_file}"; then
+            if [[ -s "$${out_file}" ]]; then
+              echo "Successfully fetched $${param_name}"
+              return 0
+            fi
+          fi
+          echo "Attempt $i: Parameter not ready yet. Sleeping 5s..."
+          sleep 5
+        done
+
+        echo "ERROR: Failed to fetch $${param_name} after 10 attempts"
+        exit 1
+      }
+
+      fetch_to_file "${server_cert}"  "$${CERT_DIR}/cert.pem"
+      fetch_to_file "${private_key}"  "$${CERT_DIR}/key.pem"
+      fetch_to_file "${bundle_certs}" "$${CERT_DIR}/bundle.pem"
+
+      chmod 0644 "$${CERT_DIR}/cert.pem" "$${CERT_DIR}/bundle.pem"
+      chmod 0600 "$${CERT_DIR}/key.pem"
+
+      echo "=== Success. First lines: ==="
+      head -n1 "$${CERT_DIR}/cert.pem" || true
+      head -n1 "$${CERT_DIR}/key.pem"  || true
+      head -n1 "$${CERT_DIR}/bundle.pem" || true
+
+      echo "=== TLS material fetched successfully ==="
+
+  - path: "/etc/terraform-enterprise/registry-token"
+    permissions: "0600"
+    owner: "root:root"
+    content: |
+      ${tfe_license}
+
+  # Pod YAML (stored as config.yaml, copied to /etc/containers/systemd/tfe.yaml)
+  - path: "/etc/terraform-enterprise/config.yaml"
+    permissions: "0644"
+    owner: "root:root"
+    content: |
+      ---
+      apiVersion: "v1"
+      kind: "Pod"
+      metadata:
+        labels:
+          app: "terraform-enterprise"
+        name: "terraform-enterprise"
+      spec:
+        restartPolicy: "Never"
+        containers:
+        - image: "images.releases.hashicorp.com/hashicorp/terraform-enterprise:${tfe_image_tag}"
+          name: "terraform-enterprise"
+          env:
+          - name: "TFE_LICENSE"
+            value: "${tfe_license}"
+          - name: "TFE_HOSTNAME"
+            value: "${tfe_hostname}"
+          - name: "TFE_OPERATIONAL_MODE"
+            value: "external"
+          - name: "TFE_HTTP_PORT"
+            value: "8080"
+          - name: "TFE_HTTPS_PORT"
+            value: "8443"
+          - name: "TFE_ENCRYPTION_PASSWORD"
+            value: "${tfe_encryption_password}"
+          - name: "TFE_DISK_CACHE_VOLUME_NAME"
+            value: "terraform-enterprise_terraform-enterprise-cache"
+          - name: "TFE_TLS_CA_BUNDLE_FILE"
+            value: "/etc/ssl/private/terraform-enterprise/bundle.pem"
+          - name: "TFE_TLS_CERT_FILE"
+            value: "/etc/ssl/private/terraform-enterprise/cert.pem"
+          - name: "TFE_TLS_KEY_FILE"
+            value: "/etc/ssl/private/terraform-enterprise/key.pem"
+
+          # database settings
+          - name: "TFE_DATABASE_USER"
+            value: "${db_user}"
+          - name: "TFE_DATABASE_PASSWORD"
+            value: "${rds_password}"
+          - name: "TFE_DATABASE_HOST"
+            value: "${db_endpoint}"
+          - name: "TFE_DATABASE_NAME"
+            value: "${rds_db_name}"
+          - name: "TFE_DATABASE_PARAMETERS"
+            value: "sslmode=disable"
+
+          # bucket settings
+          - name: "TFE_OBJECT_STORAGE_TYPE"
+            value: "s3"
+          - name: "TFE_OBJECT_STORAGE_S3_REGION"
+            value: "${region}"
+          - name: "TFE_OBJECT_STORAGE_S3_BUCKET"
+            value: "${s3_bucket_name}"
+          - name: "TFE_OBJECT_STORAGE_S3_USE_INSTANCE_PROFILE"
+            value: "true"
+
+          # IMPORTANT: must be $${PRIVATE_IP} so Terraform does NOT try to interpolate it.
+          - name: "TFE_VAULT_CLUSTER_ADDRESS"
+            value: "https://$${PRIVATE_IP}:8201"
+
+          ports:
+          - containerPort: 8080
+            hostPort: 80
+          - containerPort: 8443
+            hostPort: 443
+          - containerPort: 9090
+            hostPort: 9090
+          - containerPort: 8201
+            hostPort: 8201
+
+          securityContext:
+            capabilities:
+              add:
+              - "CAP_IPC_LOCK"
+            readOnlyRootFilesystem: true
+            seLinuxOptions:
+              type: "spc_t"
+
+          volumeMounts:
+          - mountPath: "/etc/ssl/private/terraform-enterprise"
+            name: "certs"
+          - mountPath: "/var/log/terraform-enterprise"
+            name: "log"
+          - mountPath: "/run"
+            name: "run"
+          - mountPath: "/tmp"
+            name: "tmp"
+          - mountPath: "/run/docker.sock"
+            name: "docker-sock"
+          - mountPath: "/var/cache/tfe-task-worker/terraform"
+            name: "terraform-enterprise_terraform-enterprise-cache-pvc"
+
+        volumes:
+        - hostPath:
+            path: "${certs_dir}"
+            type: "Directory"
+          name: "certs"
+        - emptyDir:
+            medium: "Memory"
+          name: "log"
+        - emptyDir:
+            medium: "Memory"
+          name: "run"
+        - emptyDir:
+            medium: "Memory"
+          name: "tmp"
+        - hostPath:
+            path: "/run/podman/podman.sock"
+            type: "File"
+          name: "docker-sock"
+        - name: "terraform-enterprise_terraform-enterprise-cache-pvc"
+          persistentVolumeClaim:
+            claimName: "terraform-enterprise_terraform-enterprise-cache"
+
+  - path: "/etc/terraform-enterprise/payload.json"
+    permissions: "0600"
+    owner: "root:root"
+    content: |
+      {
+        "username": "admin",
+        "email": "it@mycompany.com",
+        "password": "${tfe_admin_password}"
+      }
+
+  - path: "/etc/containers/systemd/terraform-enterprise.kube"
+    permissions: "0644"
+    owner: "root:root"
+    content: |
+      [Install]
+      WantedBy=default.target
+      [Service]
+      Restart=always
+      [Kube]
+      Yaml=tfe.yaml
+
+  - path: "/usr/local/bin/set-private-ip.sh"
+    permissions: "0755"
+    owner: "root:root"
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+
+      TOKEN="$(curl -sS -X PUT "http://169.254.169.254/latest/api/token" \
+        -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")"
+
+      PRIVATE_IP="$(curl -sS -H "X-aws-ec2-metadata-token: $TOKEN" \
+        "http://169.254.169.254/latest/meta-data/local-ipv4")"
+
+      # Replace literal in the YAML with the instance private IP.
+      sed -i 's|$${PRIVATE_IP}|'"$PRIVATE_IP"'|g' /etc/containers/systemd/tfe.yaml
+
+  - path: "/usr/local/bin/tfe-bootstrap.sh"
+    permissions: "0755"
+    owner: "root:root"
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+
+      LOG_FILE="/var/log/tfe-bootstrap.log"
+      exec > >(tee -a "$LOG_FILE") 2>&1
+
+      echo "==== TFE bootstrap starting ===="
+
+      REGISTRY_TOKEN_FILE="/etc/terraform-enterprise/registry-token"
+
+      echo "Logging into images.releases.hashicorp.com..."
+      cat "$REGISTRY_TOKEN_FILE" | podman login --username terraform images.releases.hashicorp.com --password-stdin
+
+      echo "Pulling TFE image..."
+      podman pull "images.releases.hashicorp.com/hashicorp/terraform-enterprise:${tfe_image_tag}"
+
+      systemctl daemon-reload
+
+      # Unit exists but is 'generated' -> cannot enable, only start
+      if systemctl list-unit-files | awk '$1=="terraform-enterprise.service"{print $2}' | grep -q generated; then
+        echo "Unit is generated; starting without enable..."
+        systemctl start terraform-enterprise.service
+      else
+        echo "Unit is a real file; enabling..."
+        systemctl enable --now terraform-enterprise.service
+      fi
+
+      echo "==== TFE bootstrap completed ===="
+
+  - path: "/usr/local/bin/tfe-admin.sh"
+    permissions: "0755"
+    owner: "root:root"
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+
+      LOG_FILE="/var/log/tfe-admin.log"
+      PAYLOAD_FILE="/etc/terraform-enterprise/payload.json"
+      TFE_HOST="${tfe_hostname}"
+
+      exec > >(tee -a "$LOG_FILE") 2>&1
+
+      echo "==== TFE admin creation (podman) ===="
+
+      echo "Waiting for terraform-enterprise container to start..."
+      CONTAINER_ID=""
+      for i in {1..60}; do
+        CONTAINER_ID="$(podman ps --format '{{.ID}} {{.Names}}' | awk '/terraform-enterprise/ {print $1; exit}')"
+        if [[ -n "$${CONTAINER_ID:-}" ]]; then
+          echo "Found container: $CONTAINER_ID"
+          break
+        fi
+        sleep 5
+      done
+
+      if [[ -z "$${CONTAINER_ID:-}" ]]; then
+        echo "ERROR: terraform-enterprise container not found after waiting."
+        podman ps || true
+        exit 1
+      fi
+
+      echo "Generating admin token via tfectl..."
+      TOKEN="$(podman exec "$${CONTAINER_ID}" tfectl admin token | tr -d '\r\n')"
+      if [[ -z "$${TOKEN:-}" ]]; then
+        echo "ERROR: Failed to get admin token."
+        exit 1
+      fi
+
+      echo "Waiting for TFE to become ready and creating initial admin user..."
+      while true; do
+        CODE="$(curl -k -s -o /dev/null -w "%%{http_code}" \
+          -H "Content-Type: application/json" \
+          --data @"$PAYLOAD_FILE" \
+          "https://$TFE_HOST/admin/initial-admin-user?token=$TOKEN")"
+
+        echo "HTTP status: $CODE"
+        if [[ "$CODE" == "200" || "$CODE" == "201" || "$CODE" == "409" ]]; then
+          echo "Admin user created (or already exists)."
+          break
+        fi
+        sleep 10
+      done
+
+      echo "==== TFE admin creation completed ===="
+
+runcmd:
+  - mkdir -p /etc/terraform-enterprise/certs
+  - bash /usr/local/bin/fetch-tfe-certs.sh
+  - mkdir -p ${data_dir}
+  - cp /etc/terraform-enterprise/config.yaml /etc/containers/systemd/tfe.yaml
+  - bash /usr/local/bin/set-private-ip.sh
+  - bash /usr/local/bin/tfe-bootstrap.sh
+  - bash /usr/local/bin/tfe-admin.sh

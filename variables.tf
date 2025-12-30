@@ -126,3 +126,8 @@ variable "server_protocol" {
   type        = string
   default     = "HTTPS"
 }
+
+variable "redis_name" {
+  description = "Name for the Redis cluster"
+  type        = string
+}

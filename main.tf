@@ -123,6 +123,14 @@ resource "aws_security_group" "web" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  ingress {
+    description = "Redis"
+    from_port   = 6379
+    to_port     = 6379
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }  
+
   egress {
     from_port   = 0
     to_port     = 0
@@ -332,6 +340,8 @@ resource "aws_launch_configuration" "example" {
     rds_db_name    = var.rds_db_name
     region         = var.region
 
+    redis_endpoint = local.redis_endpoint
+
     # PRIVATE_IP = "$${PRIVATE_IP}"
   }))
 
@@ -423,7 +433,31 @@ resource "aws_db_instance" "default" {
   tags = { Name = "${var.name}-rds" }
 }
 
+# Redis cache
+resource "aws_elasticache_subnet_group" "redis_subnet_group" {
+  name       = "${var.name}-redis-subnetgroup"
+  subnet_ids = data.aws_subnets.default.ids
+}
+
+resource "aws_elasticache_cluster" "tfe_redis" {
+  cluster_id           = var.redis_name
+  engine               = "redis"
+  node_type            = "cache.t3.small"
+  num_cache_nodes      = 1
+  parameter_group_name = "default.redis7"
+  engine_version       = "7.1"
+  port                 = 6379
+
+  security_group_ids = [aws_security_group.web.id]
+  subnet_group_name  = aws_elasticache_subnet_group.redis_subnet_group.name
+}
+
 locals {
   server_fullchain_pem = "${acme_certificate.server.certificate_pem}\n${acme_certificate.server.issuer_pem}"
   rds_endpoint         = "${aws_db_instance.default.address}:${aws_db_instance.default.port}"
+
+  redis_hostname = aws_elasticache_cluster.tfe_redis.cache_nodes[0].address
+  redis_port     = aws_elasticache_cluster.tfe_redis.port
+
+  redis_endpoint = "${local.redis_hostname}:${local.redis_port}"
 }

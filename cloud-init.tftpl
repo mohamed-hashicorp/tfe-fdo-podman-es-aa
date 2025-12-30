@@ -161,6 +161,12 @@ write_files:
           - name: "TFE_VAULT_CLUSTER_ADDRESS"
             value: "https://$${PRIVATE_IP}:8201"
 
+          # redis settings
+          - name: "TFE_REDIS_HOST"
+            value: "${redis_endpoint}"  
+          - name: "TFE_REDIS_USE_AUTH"
+            value: "false"  
+
           ports:
           - containerPort: 8080
             hostPort: 80

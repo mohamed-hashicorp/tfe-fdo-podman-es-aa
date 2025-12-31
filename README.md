@@ -20,11 +20,11 @@ This guide was executed on MacOS so it assumes the following:
 ## Clone the repository
 - Clone the Github repo
 ```
-git clone https://github.com/mohamed-hashicorp/tfe-fdo-podman-es-si.git
+git clone https://github.com/mohamed-hashicorp/tfe-fdo-podman-es-aa.git
 ```
 - Change the directory
 ```
-cd tfe-fdo-podman-es-si
+cd tfe-fdo-podman-es-aa
 ```
 
 ## Configure your variables
